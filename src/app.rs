@@ -141,6 +141,7 @@ pub fn folder(group: &[FileItem]) -> PathBuf {
 pub enum Msg {
     Apps(Vec<InstalledApp>),
     Files(Target, u64, Vec<FileItem>),
+    Status(String),
 }
 
 pub enum Confirm {
@@ -232,6 +233,7 @@ impl App {
                     list.open_groups_to_review();
                 }
             }
+            Msg::Status(status) => self.status = status,
         }
     }
 

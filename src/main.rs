@@ -5,6 +5,7 @@ mod scan;
 mod size;
 mod trash;
 mod ui;
+mod update;
 
 use app::App;
 use ratatui::crossterm::event::{self, Event};
@@ -18,20 +19,56 @@ fn main() -> std::io::Result<()> {
     match std::env::args().nth(1).as_deref() {
         None => {}
         Some("--version") => {
-            println!("cleaner {}", env!("CARGO_PKG_VERSION"));
+            println!("cleaner {}", update::CURRENT);
+            return Ok(());
+        }
+        Some("update") => {
+            if let Err(message) = update_command() {
+                eprintln!("cleaner: {message}");
+                std::process::exit(1);
+            }
             return Ok(());
         }
         Some(_) => {
-            eprintln!("Usage: cleaner [--version]");
+            eprintln!("Usage: cleaner [update | --version]");
             std::process::exit(2);
         }
     }
     let (tx, rx) = mpsc::channel();
+    if update::enabled() {
+        update_in_background(tx.clone());
+    }
     let mut app = App::new(tx);
     let mut terminal = ratatui::init();
     let result = run(&mut terminal, &mut app, &rx);
     ratatui::restore();
     result
+}
+
+fn update_command() -> Result<(), String> {
+    if !update::enabled() {
+        return Err("Only release builds update themselves. Rebuild from source instead.".into());
+    }
+    let Some(latest) = update::newer_release()? else {
+        println!("cleaner v{} is up to date.", update::CURRENT);
+        return Ok(());
+    };
+    println!("Downloading v{latest}...");
+    update::install(&latest)?;
+    println!("Updated to v{latest}.");
+    Ok(())
+}
+
+/// An offline start is normal, so only a failed install of a found release is shown.
+fn update_in_background(tx: mpsc::Sender<app::Msg>) {
+    std::thread::spawn(move || {
+        let Ok(Some(latest)) = update::newer_release() else { return };
+        let status = match update::install(&latest) {
+            Ok(()) => format!("Updated to v{latest}. Restart cleaner to use it."),
+            Err(error) => format!("Update failed: {error}"),
+        };
+        let _ = tx.send(app::Msg::Status(status));
+    });
 }
 
 fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, rx: &mpsc::Receiver<app::Msg>) -> std::io::Result<()> {
