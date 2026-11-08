@@ -1,0 +1,19 @@
+[package]
+name = "cleaner"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Uninstall Mac apps with their leftovers, clean junk and orphaned files, from the terminal"
+repository = "https://github.com/rokartur/cleaner"
+
+[dependencies]
+libc = "0.2"
+plist = "1"
+ratatui = "0.30"
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
