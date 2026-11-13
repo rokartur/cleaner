@@ -98,6 +98,6 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-To make a release, set `version` in `Cargo.toml` and push the tag `v<version>`. The release workflow builds the macOS binaries and publishes them as the latest release.
+To make a release, set `version` in `Cargo.toml` and push the tag `v<version>`. The release workflow builds the macOS binaries and publishes them as the latest release. A version with a suffix, such as `0.2.0-beta.1`, is published as a pre-release: `install.sh` and self-update skip it, and a beta build does not update itself.
 
 © 2026 Artur Rok. All rights reserved.
