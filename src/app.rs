@@ -308,8 +308,8 @@ pub struct App {
     pub brew: Brew,
     /// Confirmed brew commands; the main loop runs them in the terminal, then calls `brew_finished`.
     pub brew_run: Option<Vec<brew::Args>>,
-    /// The update channel: releases only, or betas too.
-    pub pre_releases: bool,
+    /// One of `update::CHANNELS`.
+    pub update_channel: &'static str,
     pub quit: bool,
     tx: Sender<Msg>,
 }
@@ -337,7 +337,7 @@ impl App {
             admin: None,
             brew: Brew::default(),
             brew_run: None,
-            pre_releases: update::pre_releases(),
+            update_channel: update::channel(),
             quit: false,
             tx,
         };
@@ -348,24 +348,20 @@ impl App {
         // So do the Homebrew entries: outdated, running services, taps.
         app.reload_brew();
         if update::enabled() {
-            app.check_for_update(true);
+            app.update_at_start();
         }
         app
     }
 
-    /// Installs a newer release on the channel. The startup check is quiet, since an offline start is normal.
-    fn check_for_update(&self, quiet: bool) {
-        let pre_releases = self.pre_releases;
+    /// The daily check: the status line hears from it only when it installed a release or failed.
+    fn update_at_start(&self) {
+        let channel = self.update_channel;
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let status = match update::newer_release(pre_releases) {
-                Ok(None) | Err(_) if quiet => return Ok(()),
-                Ok(Some(latest)) => match update::install(&latest) {
-                    Ok(()) => format!("Updated to v{latest}. Restart cleaner to use it."),
-                    Err(error) => format!("Update failed: {error}"),
-                },
-                Ok(None) => format!("cleaner v{} is up to date.", update::CURRENT),
-                Err(error) => error,
+            let status = match update::install_latest(channel) {
+                Ok(Some(version)) => format!("Updated to v{version}. Restart cleaner to use it."),
+                Ok(None) => return Ok(()),
+                Err(error) => format!("Update failed: {error}"),
             };
             tx.send(Msg::Status(status))
         });
@@ -849,22 +845,37 @@ impl App {
     }
 
     fn switch_channel(&mut self) {
-        if let Err(error) = update::save_pre_releases(!self.pre_releases) {
+        let current = update::CHANNELS.iter().position(|channel| *channel == self.update_channel).expect("update_channel is one of CHANNELS");
+        let next = update::CHANNELS[(current + 1) % update::CHANNELS.len()];
+        if let Err(error) = update::save_channel(next) {
             self.status = error;
             return;
         }
-        self.pre_releases = !self.pre_releases;
+        self.update_channel = next;
+        if next == "off" {
+            self.status = "Channel: off. cleaner no longer checks for updates at start.".into();
+            return;
+        }
         self.check_now();
     }
 
+    /// `off` only stops the check at start, so a check now with it follows stable releases.
     fn check_now(&mut self) {
-        let channel = if self.pre_releases { "pre-release" } else { "stable" };
+        let channel = self.update_channel;
         if !update::enabled() {
             self.status = format!("Channel: {channel}. Only release builds update themselves.");
             return;
         }
         self.status = format!("Channel: {channel}. Checking...");
-        self.check_for_update(false);
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let status = match update::install_now(channel, &|_| ()) {
+                Ok(Some(version)) => format!("Updated to v{version}. Restart cleaner to use it."),
+                Ok(None) => format!("cleaner v{} is up to date.", update::CURRENT),
+                Err(error) => format!("Update failed: {error}"),
+            };
+            tx.send(Msg::Status(status))
+        });
     }
 
     /// The cursor of a Homebrew view, inside its rows even after the list shrank.
