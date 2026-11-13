@@ -58,6 +58,7 @@ const CATEGORY_ORDER: &[&str] = &[
     "User Caches",
     "User Logs",
     "Developer",
+    "Cargo Targets",
     "iOS Backups",
     "iOS Software Updates",
     "System Caches",
@@ -509,6 +510,11 @@ pub fn junk(include_system: bool) -> Vec<FileItem> {
             catalog.push(("Developer", home.join("Library/Application Support").join(editor).join(cache), false, Mode::Whole, true));
         }
     }
+    let mut targets = Vec::new();
+    cargo_targets(&home, 6, &mut targets);
+    for target in targets {
+        catalog.push(("Cargo Targets", target, false, Mode::Whole, true));
+    }
     if include_system {
         catalog.push(("System Caches", PathBuf::from("/Library/Caches"), true, Mode::Contents, false));
         catalog.push(("System Logs", PathBuf::from("/Library/Logs"), true, Mode::Contents, false));
@@ -534,6 +540,28 @@ pub fn junk(include_system: bool) -> Vec<FileItem> {
     items.retain(|item| item.size > 0);
     sort(&mut items);
     items
+}
+
+/// Folders a Rust project search never enters: media libraries, dependency trees, build output.
+const CARGO_SKIP: &[&str] = &["Library", "Applications", "Pictures", "Music", "Movies", "node_modules", "target"];
+
+/// `target` folders of Rust projects, so one group tick runs `cargo clean` everywhere. Cargo writes
+/// CACHEDIR.TAG into every build folder, which keeps an unrelated `target` next to a Cargo.toml out.
+fn cargo_targets(folder: &Path, remaining: usize, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(folder) else { return };
+    let has_manifest = folder.join("Cargo.toml").is_file();
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        if name == "target" && has_manifest && path.join("CACHEDIR.TAG").is_file() {
+            out.push(path);
+        } else if remaining > 1 && !name.starts_with('.') && !CARGO_SKIP.contains(&name.as_str()) {
+            cargo_targets(&path, remaining - 1, out);
+        }
+    }
 }
 
 const ORPHAN_CATEGORIES: &[&str] =
@@ -663,6 +691,30 @@ mod tests {
             size: None,
             installed: 0,
         }
+    }
+
+    #[test]
+    fn cargo_targets_finds_tagged_build_folders_of_rust_projects() {
+        let root = std::env::temp_dir().join(format!("cleaner-cargo-{}", std::process::id()));
+        for (folder, files) in [
+            ("code/app", &["Cargo.toml"][..]),
+            ("code/app/target", &["CACHEDIR.TAG"]),
+            ("code/app/crates/core", &["Cargo.toml"]),
+            ("code/untagged", &["Cargo.toml"]),
+            ("code/untagged/target", &[]),
+            ("code/java/target", &["CACHEDIR.TAG"]),
+            ("code/.hidden", &["Cargo.toml"]),
+            ("code/.hidden/target", &["CACHEDIR.TAG"]),
+        ] {
+            std::fs::create_dir_all(root.join(folder)).unwrap();
+            for file in files {
+                std::fs::write(root.join(folder).join(file), b"").unwrap();
+            }
+        }
+        let mut found = Vec::new();
+        cargo_targets(&root, 6, &mut found);
+        assert_eq!(found, [root.join("code/app/target")]);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

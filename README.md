@@ -45,7 +45,7 @@ A release build checks GitHub at each start. When it finds a newer release, it i
 ## Pages
 
 - **Apps:** open an app to see what it takes on disk, the app plus every file it left behind. Matches by bundle id or full name are selected. Vendor folders and partial name matches stay unselected for you to check.
-- **Junk:** user caches, logs, saved state and developer caches. Toolchains and package stores stay unselected.
+- **Junk:** user caches, logs, saved state and developer caches. Toolchains and package stores stay unselected. The Cargo Targets group lists the `target` folder of every Rust project in your home folder: select the group to run the equivalent of `cargo clean` in all of them.
 - **Orphans:** files of apps you already deleted, graded by confidence. Nothing is preselected.
 - **History:** every removal, with `u` to put the files back.
 
