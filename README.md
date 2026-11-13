@@ -45,7 +45,7 @@ cleaner update     # install the latest release now
 cleaner --version
 ```
 
-A release build checks GitHub at each start. When it finds a newer release, it installs it in the background, and the new version runs from the next start. A build from source never updates itself.
+A release build checks GitHub at each start. When it finds a newer release, it installs it in the background, and the new version runs from the next start. The update channel on the Settings page picks what counts: stable takes releases only, and pre-release also takes betas such as `0.3.0-beta.1`. A beta build on the stable channel moves to the release that follows it. A build from source never updates itself.
 
 ## Pages
 
@@ -54,6 +54,7 @@ A release build checks GitHub at each start. When it finds a newer release, it i
 - **Orphans:** files of apps you already deleted, graded by confidence. Nothing is preselected.
 - **History:** every removal, with `u` to put the files back.
 - **Homebrew:** six views in the sidebar. Installed and Outdated list your formulae and casks with their size, the ones you asked for first. Search finds packages to install. Services starts and stops `brew services`, Taps adds and removes taps, and Maintenance runs upgrade, cleanup, autoremove, update and doctor with what each would do now.
+- **Settings:** the update channel, stable or pre-release, and the version of this build.
 
 Every removal on the Apps, Junk and Orphans pages goes to the Trash, in one `<app> — <date>` folder. Press `s` to also scan `/Library`, `/etc` and `/var/log`. Root-owned files move with `sudo`, after you confirm and see each path.
 
@@ -63,7 +64,7 @@ Homebrew commands that install, upgrade or remove show the exact `brew` command 
 
 | Key | Action |
 | --- | --- |
-| `1`-`5`, `tab` | Switch page |
+| `1`-`6`, `tab` | Switch page |
 | `↑` `↓`, `j` `k`, `g` `G` | Move, jump to the top or bottom |
 | `enter`, `esc` | Open an app or a group, go back |
 | `space`, `a` | Select an item or a group, select only the safe items |
@@ -85,9 +86,11 @@ In the Homebrew views:
 | `a`, `d`, `o` | Add a tap, remove a tap, open its repository |
 | `enter` | Run a maintenance task |
 
+On the Settings page, `enter` switches the update channel and checks for an update, and `u` checks without switching.
+
 ## Files
 
-cleaner keeps its Delete History in `~/.config/cleaner/trash-history.json`. Until that file exists, it reads the history of the BetterCleaner app, so earlier removals stay restorable. No telemetry, no account.
+cleaner keeps its Delete History in `~/.config/cleaner/trash-history.json` and its settings in `~/.config/cleaner/settings.json`. Until the history file exists, it reads the history of the BetterCleaner app, so earlier removals stay restorable. No telemetry, no account.
 
 ## Development
 
@@ -98,6 +101,6 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-To make a release, set `version` in `Cargo.toml` and push the tag `v<version>`. The release workflow builds the macOS binaries and publishes them as the latest release. A version with a suffix, such as `0.2.0-beta.1`, is published as a pre-release: `install.sh` and self-update skip it, and a beta build does not update itself.
+To make a release, set `version` in `Cargo.toml` and push the tag `v<version>`. The release workflow builds the macOS binaries and publishes them as the latest release. A version with a suffix, such as `0.2.0-beta.1`, is published as a pre-release: `install.sh` and the stable channel skip it, and the pre-release channel installs it.
 
 © 2026 Artur Rok. All rights reserved.

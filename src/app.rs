@@ -3,6 +3,7 @@ use crate::brew::{self, Package};
 use crate::scan::{self, FileItem};
 use crate::size;
 use crate::trash::{self, Batch, Entry};
+use crate::update;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::collections::HashSet;
 use std::ops::Range;
@@ -17,6 +18,7 @@ pub enum Page {
     Orphans,
     History,
     Brew(View),
+    Settings,
 }
 
 /// The Homebrew page's views, nested under it in the sidebar.
@@ -31,7 +33,7 @@ pub enum View {
 }
 
 /// Sidebar order, which tab walks.
-pub const PAGES: [Page; 10] = [
+pub const PAGES: [Page; 11] = [
     Page::Apps,
     Page::Junk,
     Page::Orphans,
@@ -42,6 +44,7 @@ pub const PAGES: [Page; 10] = [
     Page::Brew(View::Services),
     Page::Brew(View::Taps),
     Page::Brew(View::Maintenance),
+    Page::Settings,
 ];
 
 impl Page {
@@ -57,6 +60,7 @@ impl Page {
             Page::Brew(View::Services) => "Services",
             Page::Brew(View::Taps) => "Taps",
             Page::Brew(View::Maintenance) => "Maintenance",
+            Page::Settings => "Settings",
         }
     }
 }
@@ -304,6 +308,8 @@ pub struct App {
     pub brew: Brew,
     /// Confirmed brew commands; the main loop runs them in the terminal, then calls `brew_finished`.
     pub brew_run: Option<Vec<brew::Args>>,
+    /// The update channel: releases only, or betas too.
+    pub pre_releases: bool,
     pub quit: bool,
     tx: Sender<Msg>,
 }
@@ -331,6 +337,7 @@ impl App {
             admin: None,
             brew: Brew::default(),
             brew_run: None,
+            pre_releases: update::pre_releases(),
             quit: false,
             tx,
         };
@@ -340,7 +347,28 @@ impl App {
         app.scan(Target::Orphans);
         // So do the Homebrew entries: outdated, running services, taps.
         app.reload_brew();
+        if update::enabled() {
+            app.check_for_update(true);
+        }
         app
+    }
+
+    /// Installs a newer release on the channel. The startup check is quiet, since an offline start is normal.
+    fn check_for_update(&self, quiet: bool) {
+        let pre_releases = self.pre_releases;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let status = match update::newer_release(pre_releases) {
+                Ok(None) | Err(_) if quiet => return Ok(()),
+                Ok(Some(latest)) => match update::install(&latest) {
+                    Ok(()) => format!("Updated to v{latest}. Restart cleaner to use it."),
+                    Err(error) => format!("Update failed: {error}"),
+                },
+                Ok(None) => format!("cleaner v{} is up to date.", update::CURRENT),
+                Err(error) => error,
+            };
+            tx.send(Msg::Status(status))
+        });
     }
 
     fn measure_brew(&mut self) {
@@ -665,7 +693,8 @@ impl App {
             KeyCode::Tab => self.show(PAGES[(self.page_index() + 1) % PAGES.len()]),
             KeyCode::BackTab => self.show(PAGES[(self.page_index() + PAGES.len() - 1) % PAGES.len()]),
             KeyCode::Char(c @ '1'..='5') => self.show(PAGES[c as usize - '1' as usize]),
-            KeyCode::Char('s') if !matches!(self.page, Page::Brew(_)) => {
+            KeyCode::Char('6') => self.show(Page::Settings),
+            KeyCode::Char('s') if !matches!(self.page, Page::Brew(_) | Page::Settings) => {
                 self.include_system = !self.include_system;
                 self.status = format!("System files {}.", if self.include_system { "included" } else { "excluded" });
                 self.rescan();
@@ -680,6 +709,7 @@ impl App {
                 (Page::Brew(View::Taps), _) => self.tap_key(key.code),
                 (Page::Brew(View::Maintenance), _) => self.chore_key(key.code),
                 (Page::Brew(view), _) => self.package_key(view, key.code),
+                (Page::Settings, _) => self.settings_key(key.code),
                 _ => self.history_key(key.code),
             },
         }
@@ -808,6 +838,33 @@ impl App {
             KeyCode::Char('u') => self.status = "Nothing in this entry can be restored.".into(),
             _ => self.history_cursor = step(self.history_cursor, self.history.len(), code),
         }
+    }
+
+    fn settings_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Enter | KeyCode::Char(' ') => self.switch_channel(),
+            KeyCode::Char('u') => self.check_now(),
+            _ => {}
+        }
+    }
+
+    fn switch_channel(&mut self) {
+        if let Err(error) = update::save_pre_releases(!self.pre_releases) {
+            self.status = error;
+            return;
+        }
+        self.pre_releases = !self.pre_releases;
+        self.check_now();
+    }
+
+    fn check_now(&mut self) {
+        let channel = if self.pre_releases { "pre-release" } else { "stable" };
+        if !update::enabled() {
+            self.status = format!("Channel: {channel}. Only release builds update themselves.");
+            return;
+        }
+        self.status = format!("Channel: {channel}. Checking...");
+        self.check_for_update(false);
     }
 
     /// The cursor of a Homebrew view, inside its rows even after the list shrank.
