@@ -1,4 +1,5 @@
 use crate::apps::{self, App as InstalledApp};
+use crate::brew::{self, Package};
 use crate::scan::{self, FileItem};
 use crate::size;
 use crate::trash::{self, Batch, Entry};
@@ -7,7 +8,7 @@ use std::collections::HashSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{SendError, Sender};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Page {
@@ -15,9 +16,33 @@ pub enum Page {
     Junk,
     Orphans,
     History,
+    Brew(View),
 }
 
-pub const PAGES: [Page; 4] = [Page::Apps, Page::Junk, Page::Orphans, Page::History];
+/// The Homebrew page's views, nested under it in the sidebar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum View {
+    Installed,
+    Outdated,
+    Search,
+    Services,
+    Taps,
+    Maintenance,
+}
+
+/// Sidebar order, which tab walks.
+pub const PAGES: [Page; 10] = [
+    Page::Apps,
+    Page::Junk,
+    Page::Orphans,
+    Page::History,
+    Page::Brew(View::Installed),
+    Page::Brew(View::Outdated),
+    Page::Brew(View::Search),
+    Page::Brew(View::Services),
+    Page::Brew(View::Taps),
+    Page::Brew(View::Maintenance),
+];
 
 impl Page {
     pub fn title(self) -> &'static str {
@@ -26,15 +51,75 @@ impl Page {
             Page::Junk => "System Junk",
             Page::Orphans => "Orphaned Files",
             Page::History => "Delete History",
+            Page::Brew(View::Installed) => "Installed",
+            Page::Brew(View::Outdated) => "Outdated",
+            Page::Brew(View::Search) => "Search",
+            Page::Brew(View::Services) => "Services",
+            Page::Brew(View::Taps) => "Taps",
+            Page::Brew(View::Maintenance) => "Maintenance",
         }
     }
 }
 
+pub const CHORES: [Chore; 5] = [Chore::UpgradeAll, Chore::Cleanup, Chore::Autoremove, Chore::Update, Chore::Doctor];
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Chore {
+    UpgradeAll,
+    Cleanup,
+    Autoremove,
+    Update,
+    Doctor,
+}
+
+impl Chore {
+    pub fn args(self) -> &'static [&'static str] {
+        match self {
+            Chore::UpgradeAll => &["upgrade"],
+            Chore::Cleanup => &["cleanup", "--prune=all"],
+            Chore::Autoremove => &["autoremove"],
+            Chore::Update => &["update"],
+            Chore::Doctor => &["doctor"],
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Chore::UpgradeAll => "Upgrade everything",
+            Chore::Cleanup => "Clean up",
+            Chore::Autoremove => "Remove unused dependencies",
+            Chore::Update => "Update Homebrew",
+            Chore::Doctor => "Check for problems",
+        }
+    }
+
+    pub fn about(self) -> &'static str {
+        match self {
+            Chore::UpgradeAll => "Upgrades every outdated formula and cask that is not pinned.",
+            Chore::Cleanup => "Deletes old versions, downloads, caches and the dependencies nothing needs, for good.",
+            Chore::Autoremove => "Uninstalls the dependencies no installed formula needs any more.",
+            Chore::Update => "Fetches the newest formula and cask list. Changes nothing installed.",
+            Chore::Doctor => "Lists problems with the Homebrew install and changes nothing. It ends as failed when it finds any.",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum AppSort {
+    #[default]
     Name,
     Size,
     Installed,
+}
+
+impl AppSort {
+    fn next(self) -> Self {
+        match self {
+            AppSort::Name => AppSort::Size,
+            AppSort::Size => AppSort::Installed,
+            AppSort::Installed => AppSort::Name,
+        }
+    }
 }
 
 /// The three file lists: an app's leftovers, junk and orphans.
@@ -138,15 +223,58 @@ pub fn folder(group: &[FileItem]) -> PathBuf {
     folder
 }
 
+/// What the Homebrew views show. A `None` list is still loading.
+#[derive(Default)]
+pub struct Brew {
+    pub packages: Option<Vec<Package>>,
+    pub services: Option<Vec<brew::Service>>,
+    pub taps: Option<Vec<brew::Tap>>,
+    pub results: Option<Vec<Package>>,
+    pub maintenance: Option<brew::Maintenance>,
+    pub searching: bool,
+    pub measuring: bool,
+    /// Why the installed packages could not be listed, such as brew missing.
+    pub error: Option<String>,
+    /// Filters Installed and Outdated by name.
+    pub filter: String,
+    pub query: String,
+    pub new_tap: String,
+    pub sort: AppSort,
+    /// Picked packages, by kind and full name, so picks survive a reload. Only the picks among the rows shown count.
+    pub picked: HashSet<(bool, String)>,
+    pub cursors: [usize; 6],
+    /// Bumped by every search, so a slow earlier search cannot overwrite a newer one.
+    search_generation: u64,
+    /// Bumped by every dry run and reload, so an estimate of the state before a brew command is dropped.
+    measure_generation: u64,
+}
+
+/// brew commands to run in the terminal after the user confirms them.
+pub struct Plan {
+    pub title: String,
+    pub commands: Vec<brew::Args>,
+    pub note: String,
+    /// Removes something: drawn in red.
+    pub removes: bool,
+}
+
 pub enum Msg {
     Apps(Vec<InstalledApp>),
     Files(Target, u64, Vec<FileItem>),
     Status(String),
+    Packages(Result<Vec<Package>, String>),
+    /// Sizes measured after `Packages`, by package key.
+    Sizes(Vec<Package>),
+    Services(Result<Vec<brew::Service>, String>),
+    Taps(Result<Vec<brew::Tap>, String>),
+    Results(u64, Result<Vec<Package>, String>),
+    Maintenance(u64, Result<brew::Maintenance, String>),
 }
 
 pub enum Confirm {
     Trash(Target),
     Restore(usize),
+    Brew(Plan),
 }
 
 pub struct App {
@@ -173,6 +301,9 @@ pub struct App {
     pub disk: Option<(u64, u64)>,
     /// Moves that hit a permission error; the main loop runs them through sudo, then calls `settle`.
     pub admin: Option<Batch>,
+    pub brew: Brew,
+    /// Confirmed brew commands; the main loop runs them in the terminal, then calls `brew_finished`.
+    pub brew_run: Option<Vec<brew::Args>>,
     pub quit: bool,
     tx: Sender<Msg>,
 }
@@ -198,6 +329,8 @@ impl App {
             include_system: false,
             disk: size::disk_space(),
             admin: None,
+            brew: Brew::default(),
+            brew_run: None,
             quit: false,
             tx,
         };
@@ -205,7 +338,64 @@ impl App {
         // The Junk and Orphans tabs show what they would free before they are opened.
         app.scan(Target::Junk);
         app.scan(Target::Orphans);
+        // So do the Homebrew entries: outdated, running services, taps.
+        app.reload_brew();
         app
+    }
+
+    fn measure_brew(&mut self) {
+        self.brew.measuring = true;
+        self.brew.measure_generation += 1;
+        let generation = self.brew.measure_generation;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || tx.send(Msg::Maintenance(generation, brew::maintenance())));
+    }
+
+    fn search_brew(&mut self) {
+        let query = self.brew.query.trim().to_owned();
+        if query.is_empty() {
+            return;
+        }
+        self.brew.search_generation += 1;
+        self.brew.searching = true;
+        self.brew.results = None;
+        let generation = self.brew.search_generation;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || tx.send(Msg::Results(generation, brew::search(&query))));
+    }
+
+    /// Runs a quick brew command that needs no terminal, such as a pin, and reloads after it.
+    fn brew_quietly(&mut self, args: &[&str], done: String) {
+        self.status = format!("brew {}...", args.join(" "));
+        let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            let status = brew::output(&args).map_or_else(|error| error, |_| done);
+            list_brew(&tx, Some(status))
+        });
+    }
+
+    /// After confirmed commands ran in the terminal: what changed is unknown, so everything reloads.
+    pub fn brew_finished(&mut self, commands: &[brew::Args], succeeded: bool) {
+        let ran = commands.iter().map(|args| format!("brew {}", args.join(" "))).collect::<Vec<_>>().join(", ");
+        self.status = if succeeded { format!("Done: {ran}.") } else { format!("Failed: {ran}.") };
+        self.brew.picked.clear();
+        self.reload_brew();
+        self.disk = size::disk_space();
+    }
+
+    /// Lists everything again and drops the Maintenance estimate, which a brew command may have changed.
+    fn reload_brew(&mut self) {
+        self.brew.error = None;
+        self.brew.maintenance = None;
+        self.brew.measuring = false;
+        self.brew.measure_generation += 1;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || list_brew(&tx, None));
+        if self.page == Page::Brew(View::Maintenance) {
+            self.measure_brew();
+        }
     }
 
     fn list_apps(&self) {
@@ -234,7 +424,46 @@ impl App {
                 }
             }
             Msg::Status(status) => self.status = status,
+            Msg::Packages(Ok(mut packages)) => {
+                // Sizes carry over until the new list is measured, so a size sort does not reshuffle under the cursor.
+                copy_sizes(&mut packages, self.brew.packages.as_deref().unwrap_or_default());
+                self.brew.packages = Some(packages);
+            }
+            Msg::Packages(Err(error)) => {
+                self.brew.packages = None;
+                self.brew.error = Some(error);
+            }
+            // Only sizes: a list measured before a pin must not undo the pin mark.
+            Msg::Sizes(measured) => {
+                if let Some(packages) = &mut self.brew.packages {
+                    copy_sizes(packages, &measured);
+                }
+            }
+            Msg::Services(services) => self.brew.services = Some(services.unwrap_or_else(|error| self.failed(error))),
+            Msg::Taps(taps) => self.brew.taps = Some(taps.unwrap_or_else(|error| self.failed(error))),
+            Msg::Results(generation, results) if generation == self.brew.search_generation => {
+                self.brew.searching = false;
+                self.brew.cursors[View::Search as usize] = 0;
+                self.brew.results = Some(results.unwrap_or_else(|error| self.failed(error)));
+            }
+            Msg::Maintenance(generation, maintenance) if generation == self.brew.measure_generation => {
+                self.brew.measuring = false;
+                match maintenance {
+                    Ok(maintenance) => self.brew.maintenance = Some(maintenance),
+                    Err(error) => self.status = error,
+                }
+            }
+            Msg::Results(..) | Msg::Maintenance(..) => {}
         }
+    }
+
+    /// Shows a background brew error on the status line and leaves its list empty.
+    /// Without brew every Homebrew view says so already, and Apps must not.
+    fn failed<T>(&mut self, error: String) -> Vec<T> {
+        if brew::program().is_some() {
+            self.status = error;
+        }
+        Vec::new()
     }
 
     pub fn list(&self, target: Target) -> &List {
@@ -270,6 +499,61 @@ impl App {
         apps
     }
 
+    /// The search results, or the installed packages filtered and sorted: the ones you asked for first, then dependencies.
+    pub fn package_rows(&self, view: View) -> Vec<&Package> {
+        if view == View::Search {
+            return self.brew.results.iter().flatten().collect();
+        }
+        let filter = self.brew.filter.to_lowercase();
+        let outdated_only = view == View::Outdated;
+        let mut packages: Vec<&Package> = self.brew.packages.iter().flatten().filter(|package| (!outdated_only || package.newer.is_some()) && package.name.to_lowercase().contains(&filter)).collect();
+        match self.brew.sort {
+            AppSort::Name => {}
+            AppSort::Size => packages.sort_by_key(|package| std::cmp::Reverse(package.size)),
+            AppSort::Installed => packages.sort_by_key(|package| std::cmp::Reverse(package.installed_at)),
+        }
+        packages.sort_by_key(|package| !package.on_request);
+        packages
+    }
+
+    /// Rows of a Homebrew view, for the cursor to stay inside.
+    fn brew_rows(&self, view: View) -> usize {
+        match view {
+            View::Installed | View::Outdated | View::Search => self.package_rows(view).len(),
+            View::Services => self.brew.services.as_ref().map_or(0, Vec::len),
+            View::Taps => self.brew.taps.as_ref().map_or(0, Vec::len),
+            View::Maintenance => CHORES.len(),
+        }
+    }
+
+    /// Whether a search result is installed, by the live list rather than the search's own snapshot.
+    pub fn is_installed(&self, found: &Package) -> bool {
+        self.brew.packages.iter().flatten().any(|package| package.key() == found.key())
+    }
+
+    pub fn is_picked(&self, package: &Package) -> bool {
+        self.brew.picked.contains(&package.key())
+    }
+
+    /// The picked rows of a package view, or the one under the cursor when none is picked.
+    fn targets(&self, view: View) -> Vec<&Package> {
+        let rows = self.package_rows(view);
+        let picked: Vec<&Package> = rows.iter().copied().filter(|package| self.is_picked(package)).collect();
+        if !picked.is_empty() {
+            return picked;
+        }
+        rows.get(self.brew_cursor(view)).copied().into_iter().collect()
+    }
+
+    pub fn package_at_cursor(&self, view: View) -> Option<&Package> {
+        self.package_rows(view).get(self.brew_cursor(view)).copied()
+    }
+
+    /// The listing error a view shows in place of its rows: Installed and Outdated, or every view once brew is missing.
+    pub fn brew_error(&self, view: View) -> Option<&str> {
+        if matches!(view, View::Installed | View::Outdated) || brew::program().is_none() { self.brew.error.as_deref() } else { None }
+    }
+
     /// Runs `change` and moves the cursor to wherever the app it was on ended up.
     fn keep_cursor(&mut self, change: impl FnOnce(&mut Self)) {
         let current = self.visible_apps().get(self.app_cursor).map(|app| app.path.clone());
@@ -300,6 +584,10 @@ impl App {
     }
 
     fn show(&mut self, page: Page) {
+        // Picks belong to the view they were made in: a search pick must not join an uninstall in Installed.
+        if page != self.page {
+            self.brew.picked.clear();
+        }
         self.page = page;
         if let Some(target) = self.target()
             && self.list(target).items.is_none()
@@ -309,6 +597,20 @@ impl App {
         }
         if page == Page::History {
             self.history = trash::entries();
+        }
+        if page == Page::Brew(View::Maintenance) && self.brew.maintenance.is_none() && !self.brew.measuring {
+            self.measure_brew();
+        }
+    }
+
+    /// The text being typed: a file list's filter, the app or package filter, the search or a new tap.
+    fn typed_text(&mut self) -> &mut String {
+        match (self.page, self.target()) {
+            (_, Some(target)) => &mut self.list_mut(target).filter,
+            (Page::Brew(View::Search), _) => &mut self.brew.query,
+            (Page::Brew(View::Taps), _) => &mut self.brew.new_tap,
+            (Page::Brew(_), _) => &mut self.brew.filter,
+            _ => &mut self.filter,
         }
     }
 
@@ -321,10 +623,12 @@ impl App {
             return;
         }
         if let Some(confirm) = self.confirm.take() {
-            if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
+            // enter also opens a brew popup, so a held or doubled enter must not run brew.
+            if key.code == KeyCode::Char('y') || (key.code == KeyCode::Enter && !matches!(confirm, Confirm::Brew(_))) {
                 match confirm {
                     Confirm::Trash(target) => self.remove_selected(target),
                     Confirm::Restore(index) => self.start(trash::restore(&self.history[index])),
+                    Confirm::Brew(plan) => self.brew_run = Some(plan.commands),
                 }
             }
             return;
@@ -334,23 +638,23 @@ impl App {
             return;
         }
         if self.editing_filter {
-            let filter = match self.target() {
-                Some(target) => &mut self.list_mut(target).filter,
-                None => &mut self.filter,
-            };
+            let text = self.typed_text();
             match key.code {
-                KeyCode::Char(c) => filter.push(c),
-                KeyCode::Backspace => _ = filter.pop(),
+                KeyCode::Char(c) => text.push(c),
+                KeyCode::Backspace => _ = text.pop(),
                 KeyCode::Esc => {
-                    filter.clear();
+                    text.clear();
                     self.editing_filter = false;
                 }
                 KeyCode::Enter | KeyCode::Down | KeyCode::Up => self.editing_filter = false,
                 _ => {}
             }
-            match self.target() {
-                Some(target) => self.list_mut(target).cursor = 0,
-                None => self.app_cursor = 0,
+            match (self.page, self.target()) {
+                (_, Some(target)) => self.list_mut(target).cursor = 0,
+                (Page::Brew(View::Search), _) if key.code == KeyCode::Enter => self.search_brew(),
+                (Page::Brew(View::Taps), _) if key.code == KeyCode::Enter => self.add_tap(),
+                (Page::Brew(view), _) => self.brew.cursors[view as usize] = 0,
+                _ => self.app_cursor = 0,
             }
             return;
         }
@@ -358,28 +662,39 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') => self.help = true,
-            KeyCode::Tab => self.show(PAGES[(self.page as usize + 1) % PAGES.len()]),
-            KeyCode::BackTab => self.show(PAGES[(self.page as usize + PAGES.len() - 1) % PAGES.len()]),
-            KeyCode::Char(c @ '1'..='4') => self.show(PAGES[c as usize - '1' as usize]),
-            KeyCode::Char('s') => {
+            KeyCode::Tab => self.show(PAGES[(self.page_index() + 1) % PAGES.len()]),
+            KeyCode::BackTab => self.show(PAGES[(self.page_index() + PAGES.len() - 1) % PAGES.len()]),
+            KeyCode::Char(c @ '1'..='5') => self.show(PAGES[c as usize - '1' as usize]),
+            KeyCode::Char('s') if !matches!(self.page, Page::Brew(_)) => {
                 self.include_system = !self.include_system;
                 self.status = format!("System files {}.", if self.include_system { "included" } else { "excluded" });
                 self.rescan();
             }
             KeyCode::Char('R') => self.rescan(),
-            _ => match self.target() {
-                Some(target) => self.file_key(target, key.code),
-                None if self.page == Page::Apps => self.apps_key(key.code),
-                None => self.history_key(key.code),
+            _ => match (self.page, self.target()) {
+                (_, Some(target)) => self.file_key(target, key.code),
+                (Page::Apps, _) => self.apps_key(key.code),
+                // The view shows an error in place of its rows, so no key may act on the hidden rows.
+                (Page::Brew(view), _) if self.brew_error(view).is_some() => {}
+                (Page::Brew(View::Services), _) => self.service_key(key.code),
+                (Page::Brew(View::Taps), _) => self.tap_key(key.code),
+                (Page::Brew(View::Maintenance), _) => self.chore_key(key.code),
+                (Page::Brew(view), _) => self.package_key(view, key.code),
+                _ => self.history_key(key.code),
             },
         }
     }
 
+    fn page_index(&self) -> usize {
+        PAGES.iter().position(|page| *page == self.page).expect("every page is in PAGES")
+    }
+
     fn rescan(&mut self) {
-        match self.target() {
-            Some(target) => self.scan(target),
-            None if self.page == Page::Apps => self.list_apps(),
-            None => self.history = trash::entries(),
+        match (self.page, self.target()) {
+            (_, Some(target)) => self.scan(target),
+            (Page::Apps, _) => self.list_apps(),
+            (Page::Brew(_), _) => self.reload_brew(),
+            _ => self.history = trash::entries(),
         }
         // Other lists scanned with the old setting rescan when next shown.
         for target in [Target::Junk, Target::Orphans] {
@@ -394,11 +709,7 @@ impl App {
         match code {
             KeyCode::Char('/') => self.editing_filter = true,
             KeyCode::Char('S') => {
-                let next = match self.app_sort {
-                    AppSort::Name => AppSort::Size,
-                    AppSort::Size => AppSort::Installed,
-                    AppSort::Installed => AppSort::Name,
-                };
+                let next = self.app_sort.next();
                 self.keep_cursor(|app| app.app_sort = next);
             }
             KeyCode::Esc => self.filter.clear(),
@@ -499,6 +810,171 @@ impl App {
         }
     }
 
+    /// The cursor of a Homebrew view, inside its rows even after the list shrank.
+    pub fn brew_cursor(&self, view: View) -> usize {
+        self.brew.cursors[view as usize].min(self.brew_rows(view).saturating_sub(1))
+    }
+
+    fn step_brew(&mut self, view: View, code: KeyCode) {
+        self.brew.cursors[view as usize] = step(self.brew_cursor(view), self.brew_rows(view), code);
+    }
+
+    fn package_key(&mut self, view: View, code: KeyCode) {
+        let installed_view = view != View::Search;
+        match code {
+            KeyCode::Char('/') => self.editing_filter = true,
+            KeyCode::Char(' ') => {
+                let Some(key) = self.package_at_cursor(view).map(Package::key) else { return };
+                if !self.brew.picked.remove(&key) {
+                    self.brew.picked.insert(key);
+                }
+                self.step_brew(view, KeyCode::Down);
+            }
+            KeyCode::Char('a') => {
+                let keys: Vec<(bool, String)> = self.package_rows(view).iter().map(|package| package.key()).collect();
+                if keys.iter().all(|key| self.brew.picked.contains(key)) {
+                    self.brew.picked.retain(|key| !keys.contains(key));
+                } else {
+                    self.brew.picked.extend(keys);
+                }
+            }
+            KeyCode::Char('o') => {
+                let homepage = self.package_at_cursor(view).map(|package| package.homepage.clone()).unwrap_or_default();
+                self.open_web(&homepage);
+            }
+            KeyCode::Esc if installed_view && !self.brew.filter.is_empty() => self.brew.filter.clear(),
+            KeyCode::Esc => self.brew.picked.clear(),
+            KeyCode::Char('i') if !installed_view => self.install(),
+            KeyCode::Char('u') if installed_view => self.upgrade(view),
+            KeyCode::Char(c @ ('d' | 'z')) if installed_view => self.uninstall(view, c == 'z'),
+            KeyCode::Char('p') if installed_view => self.pin(view),
+            KeyCode::Char('S') if installed_view => self.brew.sort = self.brew.sort.next(),
+            _ => self.step_brew(view, code),
+        }
+    }
+
+    fn install(&mut self) {
+        let targets: Vec<&Package> = self.targets(View::Search).into_iter().filter(|package| !self.is_installed(package)).collect();
+        if targets.is_empty() {
+            self.status = "Nothing to install.".into();
+            return;
+        }
+        let title = format!("Install {}?", what(&targets));
+        let commands = brew::per_kind(&["install"], &["install"], &targets);
+        self.confirm = Some(Confirm::Brew(Plan { title, commands, note: "Formulae bring their dependencies; a cask may ask for your password.".into(), removes: false }));
+    }
+
+    fn upgrade(&mut self, view: View) {
+        let targets: Vec<&Package> = self.targets(view).into_iter().filter(|package| package.newer.is_some() && !package.pinned).collect();
+        if targets.is_empty() {
+            self.status = "Nothing to upgrade: up to date or pinned.".into();
+            return;
+        }
+        let title = format!("Upgrade {}?", what(&targets));
+        let commands = brew::per_kind(&["upgrade"], &["upgrade"], &targets);
+        self.confirm = Some(Confirm::Brew(Plan { title, commands, note: "A running app may need to quit first.".into(), removes: false }));
+    }
+
+    fn uninstall(&mut self, view: View, zap: bool) {
+        let picked = self.targets(view);
+        if picked.is_empty() {
+            return;
+        }
+        let (targets, kept) = brew::removable(self.brew.packages.as_deref().unwrap_or_default(), picked);
+        if targets.is_empty() {
+            self.status = format!("Kept {}: pinned or needed by other packages.", names(&kept));
+            return;
+        }
+        if zap && !targets.iter().any(|package| package.cask) {
+            self.status = if kept.iter().any(|package| package.cask) {
+                format!("Kept {}: pinned or needed by other packages.", names(&kept))
+            } else {
+                "Only casks leave files to zap; d uninstalls a formula.".into()
+            };
+            return;
+        }
+        let (verb, cask_args, note) = if zap {
+            ("Zap", &["uninstall", "--zap"][..], "Zap also removes the settings, caches and logs the casks keep in ~/Library. brew deletes most of it for good.")
+        } else {
+            ("Uninstall", &["uninstall"][..], "brew deletes for good, not to the Trash, and also uninstalls the dependencies nothing else needs.")
+        };
+        let mut note = note.to_owned();
+        if !kept.is_empty() {
+            note += &format!(" Leaves out {}: pinned or needed by other packages.", names(&kept));
+        }
+        let plan = Plan { title: format!("{verb} {}?", what(&targets)), commands: brew::per_kind(&["uninstall"], cask_args, &targets), note, removes: true };
+        self.confirm = Some(Confirm::Brew(plan));
+    }
+
+    fn pin(&mut self, view: View) {
+        let Some(package) = self.package_at_cursor(view) else { return };
+        let (verb, done) = if package.pinned { ("unpin", "Unpinned") } else { ("pin", "Pinned") };
+        let (kind, name) = (if package.cask { "--cask" } else { "--formula" }, package.full_name.clone());
+        self.brew_quietly(&[verb, kind, "--", &name], format!("{done} {name}."));
+    }
+
+    fn service_key(&mut self, code: KeyCode) {
+        let cursor = self.brew_cursor(View::Services);
+        // Only `none` is unloaded: `start` refuses a loaded service, even one that stopped or failed.
+        let service = self.brew.services.iter().flatten().nth(cursor).map(|service| (service.name.clone(), service.status != "none"));
+        match (code, service) {
+            (KeyCode::Enter, Some((name, true))) => self.brew_quietly(&["services", "stop", "--", &name], format!("Stopped {name}.")),
+            (KeyCode::Enter, Some((name, false))) => self.brew_quietly(&["services", "start", "--", &name], format!("Started {name}.")),
+            (KeyCode::Char('r'), Some((name, _))) => self.brew_quietly(&["services", "restart", "--", &name], format!("Restarted {name}.")),
+            _ => self.step_brew(View::Services, code),
+        }
+    }
+
+    fn tap_key(&mut self, code: KeyCode) {
+        let cursor = self.brew_cursor(View::Taps);
+        let tap = self.brew.taps.iter().flatten().nth(cursor).map(|tap| (tap.name.clone(), tap.remote.clone()));
+        match (code, tap) {
+            (KeyCode::Char('a'), _) => self.editing_filter = true,
+            (KeyCode::Char('d'), Some((name, _))) => {
+                let commands = vec![["untap", "--", &name].map(str::to_owned).to_vec()];
+                let plan = Plan { title: format!("Remove the tap {name}?"), commands, note: "brew refuses while a package from it is installed.".into(), removes: true };
+                self.confirm = Some(Confirm::Brew(plan));
+            }
+            (KeyCode::Char('o'), Some((_, remote))) => self.open_web(&remote),
+            _ => self.step_brew(View::Taps, code),
+        }
+    }
+
+    /// Asks before tapping the `user/repo` typed in the Taps view.
+    fn add_tap(&mut self) {
+        let name = std::mem::take(&mut self.brew.new_tap).trim().to_owned();
+        if name.is_empty() {
+            return;
+        }
+        if !brew::is_tap_name(&name) {
+            self.status = format!("\"{name}\" is not a tap name: type it as user/repo.");
+            return;
+        }
+        let note = "A tap is someone else's repository: what you install from it runs their code.".into();
+        self.confirm = Some(Confirm::Brew(Plan { title: format!("Add the tap {name}?"), commands: vec![vec!["tap".into(), name]], note, removes: false }));
+    }
+
+    fn chore_key(&mut self, code: KeyCode) {
+        let chore = CHORES[self.brew_cursor(View::Maintenance)];
+        match code {
+            KeyCode::Enter => {
+                let commands = vec![chore.args().iter().map(|arg| arg.to_string()).collect()];
+                let removes = matches!(chore, Chore::Cleanup | Chore::Autoremove);
+                self.confirm = Some(Confirm::Brew(Plan { title: format!("{}?", chore.title()), commands, note: chore.about().into(), removes }));
+            }
+            _ => self.step_brew(View::Maintenance, code),
+        }
+    }
+
+    /// Package and tap pages come from third-party taps, so only web links open: never a file or an app.
+    fn open_web(&mut self, url: &str) {
+        if !url.starts_with("https://") && !url.starts_with("http://") {
+            self.status = "No web page to open.".into();
+            return;
+        }
+        let _ = Command::new("open").arg(url).spawn();
+    }
+
     fn remove_selected(&mut self, target: Target) {
         let origin = match (target, &self.opened) {
             (Target::Leftovers, Some(app)) => app.name.clone(),
@@ -553,6 +1029,50 @@ fn sort_apps(apps: &mut [&InstalledApp], sort: AppSort) {
         AppSort::Installed => apps.sort_by_key(|app| std::cmp::Reverse(app.installed)),
     }
     apps.sort_by_key(|app| app.is_system);
+}
+
+/// Lists packages, services and taps, then sends the status, so a key pressed once it shows acts on the new lists.
+/// Sizes follow.
+fn list_brew(tx: &Sender<Msg>, status: Option<String>) -> Result<(), SendError<Msg>> {
+    let (packages, services, taps) = std::thread::scope(|scope| {
+        let services = scope.spawn(brew::services);
+        let taps = scope.spawn(brew::taps);
+        (brew::installed(), services.join().expect("brew services thread panicked"), taps.join().expect("brew taps thread panicked"))
+    });
+    tx.send(Msg::Packages(packages.clone()))?;
+    tx.send(Msg::Services(services))?;
+    tx.send(Msg::Taps(taps))?;
+    if let Some(status) = status {
+        tx.send(Msg::Status(status))?;
+    }
+    let Ok(mut packages) = packages else { return Ok(()) };
+    brew::measure(&mut packages);
+    tx.send(Msg::Sizes(packages))
+}
+
+fn copy_sizes(packages: &mut [Package], from: &[Package]) {
+    for package in packages {
+        if let Some(size) = from.iter().find(|other| other.key() == package.key()).and_then(|other| other.size) {
+            package.size = Some(size);
+        }
+    }
+}
+
+/// `ffmpeg`, or `3 packages`.
+fn what(packages: &[&Package]) -> String {
+    match packages {
+        [package] => package.name.clone(),
+        _ => trash::plural(packages.len(), "package"),
+    }
+}
+
+/// Up to three names, then how many more.
+fn names(packages: &[&Package]) -> String {
+    let shown: Vec<&str> = packages.iter().take(3).map(|package| package.name.as_str()).collect();
+    match packages.len() {
+        0..=3 => shown.join(", "),
+        count => format!("{} and {} more", shown.join(", "), count - 3),
+    }
 }
 
 fn step(cursor: usize, count: usize, code: KeyCode) -> usize {

@@ -1,5 +1,6 @@
 mod app;
 mod apps;
+mod brew;
 mod matcher;
 mod scan;
 mod size;
@@ -85,14 +86,46 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, rx: &mpsc::Receiv
         if let Some(batch) = app.admin.take() {
             ratatui::restore();
             run_as_admin(&batch.pending);
-            // ratatui::init would install one more panic hook per prompt.
-            enable_raw_mode()?;
-            execute!(std::io::stdout(), EnterAlternateScreen)?;
-            terminal.clear()?;
+            reenter(terminal)?;
             app.settle(batch);
+        }
+        if let Some(commands) = app.brew_run.take() {
+            ratatui::restore();
+            let succeeded = run_brew(&commands);
+            reenter(terminal)?;
+            app.brew_finished(&commands, succeeded);
         }
     }
     Ok(())
+}
+
+fn reenter(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<()> {
+    // ratatui::init would install one more panic hook per prompt.
+    enable_raw_mode()?;
+    execute!(std::io::stdout(), EnterAlternateScreen)?;
+    terminal.clear()
+}
+
+/// Confirmed brew commands run in the plain terminal, so brew's own output and prompts show.
+fn run_brew(commands: &[brew::Args]) -> bool {
+    let Some(program) = brew::program() else { return false };
+    // Ctrl-C reaches the whole process group: only brew should stop.
+    // SAFETY: changes this process's SIGINT disposition, restored below.
+    unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
+    let mut succeeded = true;
+    for args in commands {
+        println!("\n$ brew {}", args.join(" "));
+        if !succeeds(Command::new(&program).args(args)) {
+            succeeded = false;
+            break;
+        }
+    }
+    print!("\n{} Press Enter to go back to cleaner. ", if succeeded { "Done." } else { "brew failed." });
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let _ = std::io::stdin().read_line(&mut String::new());
+    // SAFETY: back to the default disposition the process started with.
+    unsafe { libc::signal(libc::SIGINT, libc::SIG_DFL) };
+    succeeded
 }
 
 /// Root-owned files move with sudo in the plain terminal, after one password prompt.
