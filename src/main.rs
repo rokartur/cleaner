@@ -36,9 +36,6 @@ fn main() -> std::io::Result<()> {
         }
     }
     let (tx, rx) = mpsc::channel();
-    if update::enabled() {
-        update_in_background(tx.clone());
-    }
     let mut app = App::new(tx);
     let mut terminal = ratatui::init();
     let result = run(&mut terminal, &mut app, &rx);
@@ -50,7 +47,7 @@ fn update_command() -> Result<(), String> {
     if !update::enabled() {
         return Err("Only release builds update themselves. Rebuild from source instead.".into());
     }
-    let Some(latest) = update::newer_release()? else {
+    let Some(latest) = update::newer_release(update::pre_releases())? else {
         println!("cleaner v{} is up to date.", update::CURRENT);
         return Ok(());
     };
@@ -58,18 +55,6 @@ fn update_command() -> Result<(), String> {
     update::install(&latest)?;
     println!("Updated to v{latest}.");
     Ok(())
-}
-
-/// An offline start is normal, so only a failed install of a found release is shown.
-fn update_in_background(tx: mpsc::Sender<app::Msg>) {
-    std::thread::spawn(move || {
-        let Ok(Some(latest)) = update::newer_release() else { return };
-        let status = match update::install(&latest) {
-            Ok(()) => format!("Updated to v{latest}. Restart cleaner to use it."),
-            Err(error) => format!("Update failed: {error}"),
-        };
-        let _ = tx.send(app::Msg::Status(status));
-    });
 }
 
 fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App, rx: &mpsc::Receiver<app::Msg>) -> std::io::Result<()> {

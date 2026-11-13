@@ -2,6 +2,7 @@ use crate::app::{self, App, AppSort, CHORES, Chore, Confirm, Page, Row, Target, 
 use crate::brew::{self, Package};
 use crate::scan::{FileItem, format_bytes};
 use crate::trash::{self, plural};
+use crate::update;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -38,6 +39,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         (_, Some(target)) => draw_files(frame, app, target, main),
         (Page::Apps, _) => draw_apps(frame, app, main),
         (Page::Brew(view), _) => draw_brew(frame, app, view, main),
+        (Page::Settings, _) => draw_settings(frame, app, main),
         _ => draw_history(frame, app, main),
     }
     rule(frame, bottom_rule);
@@ -95,6 +97,8 @@ fn draw_sidebar(frame: &mut Frame, app: &App, area: Rect) {
         let (marker, style) = if page == app.page { ("▌ ", Style::new().fg(ACCENT)) } else { ("  ", Style::new()) };
         lines.push(sidebar_row(&format!("  {marker}{}", page.title()), &count, width, style, count_style));
     }
+    let style = if app.page == Page::Settings { BADGE } else { Style::new() };
+    lines.push(sidebar_row("  6 Settings", "", width, style, style));
     frame.render_widget(Paragraph::new(lines), pages_area);
     let Some((total, free)) = app.disk.filter(|(total, _)| *total > 0) else { return };
     let used = 1.0 - free as f64 / total as f64;
@@ -653,6 +657,30 @@ fn draw_history(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), files_area);
 }
 
+/// The update channel and this build, with what the channel does in the detail pane.
+fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
+    let pane = area.width >= DETAIL_FROM;
+    let pane_width = if pane { DETAIL_WIDTH } else { 0 };
+    let [main, pane_rule, pane_area] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(pane as u16), Constraint::Length(pane_width)]).areas(area);
+    let [head, gap, list_area] = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Fill(1)]).areas(main);
+    frame.render_widget(Paragraph::new(Line::styled(" Settings", BOLD)), head);
+    rule(frame, gap);
+    let width = list_area.width.saturating_sub(LIST_CHROME) as usize;
+    let (stable, pre_release) = if app.pre_releases { (DIM, Style::new().fg(ACCENT)) } else { (Style::new().fg(ACCENT), DIM) };
+    let options = "stable  pre-release".len();
+    let channel = Line::from(vec![Span::raw(pad("Update channel", width.saturating_sub(options))), Span::styled("stable", stable), Span::raw("  "), Span::styled("pre-release", pre_release)]);
+    let build = if update::enabled() { "release build" } else { "local build, never updates itself" };
+    let version = row("Version", &format!("{}, {build}", update::CURRENT), width, Style::new());
+    cursor_list(frame, list_area, vec![ListItem::new(on_cursor(channel)), ListItem::new(version)], 0);
+    if !pane {
+        return;
+    }
+    vertical_rule(frame, pane_rule);
+    let about = "Stable installs releases only, and a beta build moves to the release that follows it. Pre-release also installs betas, such as v0.3.0-beta.1.";
+    let detail = vec![Line::styled("Update channel", BOLD), Line::styled(about, DIM), Line::raw(""), fact("checks", "at each start and on u", pane_area.width.saturating_sub(2) as usize)];
+    frame.render_widget(Paragraph::new(detail).wrap(Wrap { trim: false }).block(Block::new().padding(Padding::horizontal(1))), pane_area);
+}
+
 /// The keys of the page in view, most used first; the footer shows as many as fit.
 fn page_keys(app: &App) -> &'static [(&'static str, &'static str)] {
     match (app.page, app.target()) {
@@ -670,6 +698,7 @@ fn page_keys(app: &App) -> &'static [(&'static str, &'static str)] {
         (Page::Brew(View::Services), _) => &[("enter", "start/stop"), ("r", "restart")],
         (Page::Brew(View::Taps), _) => &[("a", "add"), ("d", "remove"), ("o", "open")],
         (Page::Brew(View::Maintenance), _) => &[("enter", "run")],
+        (Page::Settings, _) => &[("enter", "change"), ("u", "check now")],
         _ => &[("u", "restore")],
     }
 }
@@ -704,8 +733,8 @@ fn draw_help(frame: &mut Frame, app: &App) {
         Page::Brew(View::Search) => keys.extend([("a", "pick every package shown"), ("esc", "clear the picks")]),
         _ => {}
     }
-    keys.extend([("↑ ↓ j k", "move"), ("pgup pgdn g G", "jump"), ("1-5, tab", "switch page")]);
-    if !matches!(app.page, Page::Brew(_)) {
+    keys.extend([("↑ ↓ j k", "move"), ("pgup pgdn g G", "jump"), ("1-6, tab", "switch page")]);
+    if !matches!(app.page, Page::Brew(_) | Page::Settings) {
         keys.push(("s", "include system locations"));
     }
     keys.extend([("R", "rescan"), ("q, ctrl-c", "quit")]);
