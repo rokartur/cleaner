@@ -666,9 +666,13 @@ fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::styled(" Settings", BOLD)), head);
     rule(frame, gap);
     let width = list_area.width.saturating_sub(LIST_CHROME) as usize;
-    let (stable, pre_release) = if app.pre_releases { (DIM, Style::new().fg(ACCENT)) } else { (Style::new().fg(ACCENT), DIM) };
-    let options = "stable  pre-release".len();
-    let channel = Line::from(vec![Span::raw(pad("Update channel", width.saturating_sub(options))), Span::styled("stable", stable), Span::raw("  "), Span::styled("pre-release", pre_release)]);
+    let options: usize = update::CHANNELS.iter().map(|option| option.len() + 2).sum();
+    let mut channel = vec![Span::raw(pad("Update channel", width.saturating_sub(options)))];
+    for option in update::CHANNELS {
+        let style = if option == app.update_channel { Style::new().fg(ACCENT) } else { DIM };
+        channel.extend([Span::raw("  "), Span::styled(option, style)]);
+    }
+    let channel = Line::from(channel);
     let build = if update::enabled() { "release build" } else { "local build, never updates itself" };
     let version = row("Version", &format!("{}, {build}", update::CURRENT), width, Style::new());
     cursor_list(frame, list_area, vec![ListItem::new(on_cursor(channel)), ListItem::new(version)], 0);
@@ -676,8 +680,8 @@ fn draw_settings(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
     vertical_rule(frame, pane_rule);
-    let about = "Stable installs releases only, and a beta build moves to the release that follows it. Pre-release also installs betas, such as v0.3.0-beta.1.";
-    let detail = vec![Line::styled("Update channel", BOLD), Line::styled(about, DIM), Line::raw(""), fact("checks", "at each start and on u", pane_area.width.saturating_sub(2) as usize)];
+    let about = "Latest installs releases only, and a beta build moves to the release that follows it. Pre-release also installs betas, such as v0.3.0-beta.1. Off never checks at start; u still installs the latest release.";
+    let detail = vec![Line::styled("Update channel", BOLD), Line::styled(about, DIM), Line::raw(""), fact("checks", "daily at start, and on u", pane_area.width.saturating_sub(2) as usize)];
     frame.render_widget(Paragraph::new(detail).wrap(Wrap { trim: false }).block(Block::new().padding(Padding::horizontal(1))), pane_area);
 }
 

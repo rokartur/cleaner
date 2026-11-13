@@ -45,7 +45,7 @@ cleaner update     # install the latest release now
 cleaner --version
 ```
 
-A release build checks GitHub at each start. When it finds a newer release, it installs it in the background, and the new version runs from the next start. The update channel on the Settings page picks what counts: stable takes releases only, and pre-release also takes betas such as `0.3.0-beta.1`. A beta build on the stable channel moves to the release that follows it. A build from source never updates itself.
+A release build checks GitHub once a day, at start. When it finds a newer release, it installs it in the background, and the new version runs from the next start. Before the new binary replaces the running one, its SHA-256 must match the release's `SHA256SUMS` and it must report the expected version. The update channel on the Settings page picks what counts: latest takes releases only, pre-release also takes betas such as `0.3.0-beta.1`, and off stops the check at start. A beta build on the latest channel moves to the release that follows it. `cleaner update` checks at once and shows each step; on the off channel it installs the latest release. A build from source never updates itself.
 
 ## Pages
 
@@ -54,7 +54,7 @@ A release build checks GitHub at each start. When it finds a newer release, it i
 - **Orphans:** files of apps you already deleted, graded by confidence. Nothing is preselected.
 - **History:** every removal, with `u` to put the files back.
 - **Homebrew:** six views in the sidebar. Installed and Outdated list your formulae and casks with their size, the ones you asked for first. Search finds packages to install. Services starts and stops `brew services`, Taps adds and removes taps, and Maintenance runs upgrade, cleanup, autoremove, update and doctor with what each would do now.
-- **Settings:** the update channel, stable or pre-release, and the version of this build.
+- **Settings:** the update channel, latest, pre-release or off, and the version of this build.
 
 Every removal on the Apps, Junk and Orphans pages goes to the Trash, in one `<app> — <date>` folder. Press `s` to also scan `/Library`, `/etc` and `/var/log`. Root-owned files move with `sudo`, after you confirm and see each path.
 
@@ -86,11 +86,11 @@ In the Homebrew views:
 | `a`, `d`, `o` | Add a tap, remove a tap, open its repository |
 | `enter` | Run a maintenance task |
 
-On the Settings page, `enter` switches the update channel and checks for an update, and `u` checks without switching.
+On the Settings page, `enter` switches to the next update channel and checks for an update, and `u` checks without switching.
 
 ## Files
 
-cleaner keeps its Delete History in `~/.config/cleaner/trash-history.json` and its settings in `~/.config/cleaner/settings.json`. Until the history file exists, it reads the history of the BetterCleaner app, so earlier removals stay restorable. No telemetry, no account.
+cleaner keeps its Delete History in `~/.config/cleaner/trash-history.json` and its settings in `~/.config/cleaner/settings.json`, with the channel of its last update check in `~/.config/cleaner/update-check`. Until the history file exists, it reads the history of the BetterCleaner app, so earlier removals stay restorable. No telemetry, no account.
 
 ## Development
 
@@ -101,6 +101,6 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-To make a release, set `version` in `Cargo.toml` and push the tag `v<version>`. The release workflow builds the macOS binaries and publishes them as the latest release. A version with a suffix, such as `0.2.0-beta.1`, is published as a pre-release: `install.sh` and the stable channel skip it, and the pre-release channel installs it.
+To make a release, set `version` in `Cargo.toml` and push the tag `v<version>`. The release workflow builds the macOS binaries and publishes them with their `SHA256SUMS` as the latest release. A version with a suffix, such as `0.2.0-beta.1`, is published as a pre-release: `install.sh` and the latest channel skip it, and the pre-release channel installs it.
 
 © 2026 Artur Rok. All rights reserved.
