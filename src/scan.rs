@@ -3,6 +3,7 @@ use crate::matcher::{self, Collisions, Descriptor, Kind, Strength};
 use crate::size;
 use std::collections::HashSet;
 use std::ffi::CStr;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
@@ -52,6 +53,9 @@ const CATEGORY_ORDER: &[&str] = &[
     "Configuration",
     "Command Line Tools",
     "Shell Completions",
+    "Shared",
+    "Installer Receipts",
+    "Elsewhere",
     "Fonts",
     "Home",
     "Temporary",
@@ -190,13 +194,17 @@ const UNIX_TOOLS: &[(&str, &str, usize)] = &[
 
 const SYSTEM_DATA: &[(&str, &str, usize)] = &[spec("Configuration", "/private/etc", 1), spec("Logs", "/private/var/log", 1)];
 
+/// Data apps share between users, and the receipts `pkgutil --pkgs` reads.
+const APP_SCAN_ONLY: &[(&str, &str, usize)] = &[spec("Shared", "/Users/Shared", 2), spec("Installer Receipts", "/private/var/db/receipts", 1)];
+
 fn build(root: &Path, specs: &[(&'static str, &str, usize)], system: bool, out: &mut Vec<Location>) {
     for &(category, sub, depth) in specs {
         let path = root.join(sub);
         if path.is_dir() && !out.iter().any(|location| location.path == path) {
             let resolves_container = category.ends_with("Containers");
             // Package managers own most of bin and completions; links into the bundle come from `cli_links`, selected.
-            let auto_selectable = !matches!(category, "Fonts" | "Command Line Tools" | "Shell Completions");
+            // /Users/Shared holds user content apps point at, such as Parallels VMs and sample libraries.
+            let auto_selectable = !matches!(category, "Fonts" | "Command Line Tools" | "Shell Completions" | "Shared");
             out.push(Location { category, path, system, depth, resolves_container, auto_selectable, hidden_only: false });
         }
     }
@@ -207,10 +215,23 @@ pub fn locations(include_system: bool) -> Vec<Location> {
     build(&home().join("Library"), LIBRARY, false, &mut out);
     build(Path::new("/"), UNIX_TOOLS, true, &mut out);
     if include_system {
-        let system: Vec<_> = LIBRARY.iter().chain(SYSTEM_LIBRARY_ONLY).copied().collect();
-        build(Path::new("/Library"), &system, true, &mut out);
+        system_library(&mut out);
         build(Path::new("/"), SYSTEM_DATA, true, &mut out);
     }
+    out
+}
+
+fn system_library(out: &mut Vec<Location>) {
+    let specs: Vec<_> = LIBRARY.iter().chain(SYSTEM_LIBRARY_ONLY).copied().collect();
+    build(Path::new("/Library"), &specs, true, out);
+}
+
+/// Launch daemons and privileged helpers live only in /Library, so an app's scan always looks there.
+fn app_locations(include_system: bool) -> Vec<Location> {
+    let mut out = locations(include_system);
+    system_library(&mut out);
+    build(Path::new("/"), APP_SCAN_ONLY, true, &mut out);
+    out.extend(home_and_temp_locations());
     out
 }
 
@@ -282,14 +303,16 @@ pub fn leftovers(app: &App, installed: &[App], include_system: bool) -> Vec<File
     if !app.is_system {
         items.push(FileItem { why: "the app itself", ..FileItem::new(app.path.clone(), "Application", false, true) });
     }
-    let mut locations = locations(include_system);
-    locations.extend(home_and_temp_locations());
+    let locations = app_locations(include_system);
     items.extend(parallel(&locations, |location| {
         let mut found = Vec::new();
         collect(&location.path, location, &context, location.depth, &mut found);
         found
     }));
     items.extend(cli_links(&app.path));
+    // Across the whole disk an executable or bundle name ("Electron", "Code") names too much: display name only.
+    let named = Descriptor::new(descriptor.ids.iter().map(String::as_str), [app.name.as_str()]);
+    items.extend(elsewhere(&named, &locations));
 
     // A file both a deep walk and its own location found keeps the selected copy.
     items.sort_by_key(|item| !item.selected);
@@ -363,6 +386,66 @@ fn cli_links(app_path: &Path) -> Vec<FileItem> {
         }
     }
     items
+}
+
+/// Cloud folders list their files from the network: a walk would download folder listings.
+const CLOUD_FOLDERS: &[&str] = &["Library/CloudStorage", "Library/Mobile Documents"];
+/// Dependency trees and build output: millions of files, none an app's.
+const BUILD_FOLDERS: &[&str] = &["node_modules", "target"];
+
+/// /System/Volumes/Data mirrors the data volume the walk reaches through /Users and the rest, /Volumes
+/// holds mounted disks such as an app's own DMG, and only macOS removes a staged system extension.
+const DISK_SKIP: &[&str] = &["/System", "/Volumes", "/Library/SystemExtensions"];
+
+/// Every folder of the startup disk the locations miss, for the app's bundle id or exact name. Hits stay
+/// unselected: Apple daemons file per-app records under bundle ids too (`~/Library/Biome`).
+fn elsewhere(app: &Descriptor, locations: &[Location]) -> Vec<FileItem> {
+    let home = home();
+    let Ok(disk) = std::fs::metadata(&home).map(|meta| meta.dev()) else { return vec![] };
+    let mut skip: HashSet<PathBuf> = DISK_SKIP.iter().map(PathBuf::from).collect();
+    skip.extend(CLOUD_FOLDERS.iter().map(|folder| home.join(folder)));
+    for location in locations.iter().filter(|location| !location.hidden_only) {
+        skip.insert(location.path.clone());
+        skip.extend(std::fs::canonicalize(&location.path));
+    }
+    let mut items = Vec::new();
+    walk_disk(Path::new("/"), disk, &skip, app, &home, &mut items);
+    items
+}
+
+fn walk_disk(folder: &Path, disk: u64, skip: &HashSet<PathBuf>, app: &Descriptor, home: &Path, items: &mut Vec<FileItem>) {
+    let Ok(entries) = std::fs::read_dir(folder) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        if name.starts_with('.') || skip.contains(&path) {
+            continue;
+        }
+        if let Some(why) = elsewhere_match(&name, app)
+            && !matcher::is_protected(&path)
+        {
+            items.push(FileItem { why, ..FileItem::new(path.clone(), "Elsewhere", !path.starts_with(home), false) });
+            continue;
+        }
+        // Only the data volume: the sealed system, other disks, autofs and devices sit on other devices.
+        // A bundle, package or reverse-DNS folder has a dot in its name and its insides are its own.
+        let walk_in =
+            entry.file_type().is_ok_and(|kind| kind.is_dir()) && path.extension().is_none() && !BUILD_FOLDERS.contains(&name.as_str()) && entry.metadata().is_ok_and(|meta| meta.dev() == disk);
+        if walk_in {
+            walk_disk(&path, disk, skip, app, home, items);
+        }
+    }
+}
+
+/// Away from the usual folders only near-certain names count: the bundle id, or the app's exact name,
+/// such as an installer `Spotify.dmg` in Downloads.
+fn elsewhere_match(name: &str, app: &Descriptor) -> Option<&'static str> {
+    if matcher::classify(name, app) == Some(matcher::Match { strength: Strength::Strong, kind: Kind::BundleId }) {
+        return Some("bundle id, outside the usual folders");
+    }
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    let exact = matcher::normalize(stem);
+    (exact.chars().count() >= 4 && app.terms.contains(&exact)).then_some("app name, outside the usual folders")
 }
 
 /// Regenerable developer caches are selected up front; toolchains and package stores need a tick.
@@ -726,6 +809,39 @@ mod tests {
         assert_eq!(orphan_confidence("Spotify", "Spotify", true, "Application Support", &index), None);
         assert_eq!(orphan_confidence("Google", "Google", true, "Application Support", &index), None);
         assert_eq!(orphan_confidence("Gone App", "Gone App", true, "Caches", &index), None);
+    }
+
+    #[test]
+    fn disk_walk_takes_ids_and_exact_names_but_never_enters_bundles() {
+        let root = std::env::temp_dir().join(format!("cleaner-walk-{}", std::process::id()));
+        for file in [
+            "opt/vendor/data/com.spotify.client.plist",
+            "Downloads/Spotify.dmg",
+            "Downloads/spotify-notes.txt",
+            "Other.app/Contents/com.spotify.client.plist",
+            "project/node_modules/x/com.spotify.client",
+            "skipped/com.spotify.client.plist",
+        ] {
+            std::fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
+            std::fs::write(root.join(file), b"x").unwrap();
+        }
+        let disk = std::fs::metadata(&root).unwrap().dev();
+        let mut found = Vec::new();
+        walk_disk(&root, disk, &HashSet::from([root.join("skipped")]), &app("com.spotify.client", "Spotify").descriptor(), &root, &mut found);
+        let mut rows: Vec<_> = found.iter().map(|item| (item.path.strip_prefix(&root).unwrap().to_string_lossy().into_owned(), item.selected)).collect();
+        rows.sort();
+        assert_eq!(rows, [("Downloads/Spotify.dmg".into(), false), ("opt/vendor/data/com.spotify.client.plist".into(), false)]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn app_scan_always_covers_library_but_keeps_etc_behind_the_toggle() {
+        let locations = app_locations(false);
+        let at = |path: &str| locations.iter().find(|location| location.path == Path::new(path));
+        assert!(at("/Library/LaunchDaemons").is_some_and(|location| location.system));
+        assert!(at("/Users/Shared").is_some_and(|location| !location.auto_selectable));
+        assert!(at("/private/var/db/receipts").is_some());
+        assert!(at("/private/etc").is_none());
     }
 
     #[test]

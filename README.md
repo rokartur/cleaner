@@ -49,14 +49,14 @@ A release build checks GitHub once a day, at start. When it finds a newer releas
 
 ## Pages
 
-- **Apps:** open an app to see what it takes on disk, the app plus every file it left behind. Matches by bundle id or full name are selected. Vendor folders and partial name matches stay unselected for you to check.
+- **Apps:** open an app to see what it takes on disk, the app plus every file it left behind. The usual folders are searched by bundle id and name: `~/Library`, `/Library` with its launch daemons and privileged helpers, `/Users/Shared`, installer receipts, command line tools and dot-folders in your home folder. The rest of the startup disk is searched for files named by the bundle id or the app's exact name, such as an installer in Downloads. Matches by bundle id or full name in the usual folders are selected. Vendor folders, partial name matches, `/Users/Shared` and everything found elsewhere stay unselected for you to check.
 - **Junk:** user caches, logs, saved state and developer caches. Toolchains and package stores stay unselected. The Cargo Targets group lists the `target` folder of every Rust project in your home folder: select the group to run the equivalent of `cargo clean` in all of them.
 - **Orphans:** files of apps you already deleted, graded by confidence. Nothing is preselected.
 - **History:** every removal, with `u` to put the files back.
 - **Homebrew:** six views in the sidebar. Installed and Outdated list your formulae and casks with their size, the ones you asked for first. Search finds packages to install. Services starts and stops `brew services`, Taps adds and removes taps, and Maintenance runs upgrade, cleanup, autoremove, update and doctor with what each would do now.
 - **Settings:** the update channel, latest, pre-release or off, and the version of this build.
 
-Every removal on the Apps, Junk and Orphans pages goes to the Trash, in one `<app> — <date>` folder. Press `s` to also scan `/Library`, `/etc` and `/var/log`. Root-owned files move with `sudo`, after you confirm and see each path.
+Every removal on the Apps, Junk and Orphans pages goes to the Trash, in one `<app> — <date>` folder. Press `s` to also scan `/etc` and `/var/log`, and `/Library` on the Junk and Orphans pages. Root-owned files move with `sudo`, after you confirm and see each path.
 
 Homebrew commands that install, upgrade or remove show the exact `brew` command first. After you confirm with `y`, they run in the terminal, so you see brew's output and its prompts. What brew removes skips Delete History, and most of it is deleted for good.
 

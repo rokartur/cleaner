@@ -299,7 +299,7 @@ pub struct App {
     pub history_cursor: usize,
     pub confirm: Option<Confirm>,
     pub status: String,
-    /// Also scan /Library, /etc and /var/log.
+    /// Also scan /etc and /var/log, and /Library for junk and orphans: an app's scan always covers it.
     pub include_system: bool,
     /// The home volume's size and free bytes.
     pub disk: Option<(u64, u64)>,
