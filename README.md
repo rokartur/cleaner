@@ -1,6 +1,6 @@
 # cleaner
 
-A terminal UI that uninstalls Mac apps with all their leftovers, cleans junk, finds files of apps you already deleted and manages Homebrew.
+A terminal UI that uninstalls Mac and Linux apps with all their leftovers, cleans junk, finds files of apps you already deleted and manages Homebrew.
 
 ```text
  Cleaner              │ Homebrew › Installed  199 packages · 9.5 GB            sort name   / filter
@@ -29,7 +29,7 @@ A terminal UI that uninstalls Mac apps with all their leftovers, cleans junk, fi
 curl -fsSL https://raw.githubusercontent.com/rokartur/cleaner/main/install.sh | sh
 ```
 
-The script installs the binary for your Mac to `~/.local/bin`. To use another folder, set `CLEANER_INSTALL_DIR`. You can also download a binary from the [releases page](https://github.com/rokartur/cleaner/releases): arm64 and x86_64.
+The script installs the binary for your Mac or Linux machine to `~/.local/bin`. To use another folder, set `CLEANER_INSTALL_DIR`. You can also download a binary from the [releases page](https://github.com/rokartur/cleaner/releases): macOS and Linux, arm64 and x86_64. The Linux binaries are linked statically and run on any distribution.
 
 From source, with Rust 1.88 or newer:
 
@@ -56,7 +56,14 @@ A release build checks GitHub once a day, at start. When it finds a newer releas
 - **Homebrew:** six views in the sidebar. Installed and Outdated list your formulae and casks with their size, the ones you asked for first. Search finds packages to install. Services starts and stops `brew services`, Taps adds and removes taps, and Maintenance runs upgrade, cleanup, autoremove, update and doctor with what each would do now.
 - **Settings:** the update channel, latest, pre-release or off, and the version of this build.
 
-Every removal on the Apps, Junk and Orphans pages goes to the Trash, in one `<app> — <date>` folder. Press `s` to also scan `/etc` and `/var/log`, and `/Library` on the Junk and Orphans pages. Root-owned files move with `sudo`, after you confirm and see each path.
+### On Linux
+
+- **Apps** lists every app with a menu entry: the `.desktop` files in `~/.local/share/applications`, `XDG_DATA_DIRS`, flatpak and snap. A desktop file id in reverse DNS, such as `org.kde.dolphin` or a flatpak's id, plays the bundle id. Launchers of your own in `~/.local/share/applications` are removable apps: the launcher goes, and the AppImage it starts from your home folder is selected with it. An app a package manager installed counts as system: cleaner removes its files in `~/.config`, `~/.local/share`, `~/.cache`, `~/.var/app`, autostart entries and user systemd units, and you uninstall the app itself with `dnf`, `apt`, `pacman`, `flatpak` or `snap`. The size column measures the flatpak or the program the launcher starts.
+- **Junk** lists `~/.cache` in place of `~/Library/Caches`, and with `s` also `/var/cache`.
+- **Orphans:** high confidence is the data of a flatpak that is no longer installed and a launcher or autostart entry whose program is gone; one whose program sat on a removable drive, or whose command is not on `PATH`, is medium confidence. A folder in the XDG folders that a command on `PATH` or a folder in `/usr/share`, `/usr/lib`, `/etc/xdg` and the like is named after counts as installed.
+- Removals go to the freedesktop Trash in `~/.local/share/Trash`, one entry per item with its `.trashinfo`, so Dolphin, Nautilus and the other file managers list them and can put them back. Delete History restores them too. Removing an app first stops and disables the selected systemd user units. An app installed by Steam, Lutris or Heroic counts as system: remove it there.
+
+Every removal on the Apps, Junk and Orphans pages goes to the Trash, on macOS in one `<app> — <date>` folder. Press `s` to also scan `/etc` and `/var/log`, and on the Junk and Orphans pages `/Library` on macOS or `/var/cache` on Linux. Root-owned files move with `sudo`, after you confirm and see each path.
 
 Homebrew commands that install, upgrade or remove show the exact `brew` command first. After you confirm with `y`, they run in the terminal, so you see brew's output and its prompts. What brew removes skips Delete History, and most of it is deleted for good.
 
@@ -70,7 +77,7 @@ Homebrew commands that install, upgrade or remove show the exact `brew` command 
 | `space`, `a` | Select an item or a group, select only the safe items |
 | `d` | Move the selection to the Trash |
 | `/`, `S` | Filter, sort apps by name, size or install date |
-| `o`, `u` | Reveal in Finder, restore a history entry |
+| `o`, `u` | Reveal in Finder (on Linux, open the folder), restore a history entry |
 | `s`, `R` | Include system locations, rescan |
 | `?`, `q` | All keys, quit |
 
@@ -101,6 +108,6 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-To make a release, set `version` in `Cargo.toml` and push the tag `v<version>`. The release workflow builds the macOS binaries and publishes them with their `SHA256SUMS` as the latest release. A version with a suffix, such as `0.2.0-beta.1`, is published as a pre-release: `install.sh` and the latest channel skip it, and the pre-release channel installs it.
+To make a release, set `version` in `Cargo.toml` and push the tag `v<version>`. The release workflow builds the macOS and Linux binaries and publishes them with their `SHA256SUMS` as the latest release. A version with a suffix, such as `0.2.0-beta.1`, is published as a pre-release: `install.sh` and the latest channel skip it, and the pre-release channel installs it.
 
 © 2026 Artur Rok. All rights reserved.

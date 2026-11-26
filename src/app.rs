@@ -8,7 +8,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::collections::HashSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{SendError, Sender};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -427,7 +427,7 @@ impl App {
         std::thread::spawn(move || {
             let mut apps = apps::installed();
             tx.send(Msg::Apps(apps.clone()))?;
-            let paths: Vec<_> = apps.iter().map(|app| app.path.clone()).collect();
+            let paths: Vec<_> = apps.iter().map(apps::payload).collect();
             for (app, (size, _)) in apps.iter_mut().zip(size::sizes(&paths)) {
                 app.size = Some(size);
             }
@@ -819,7 +819,7 @@ impl App {
                     Some(Row::Group(range)) => folder(&items[range.clone()]),
                     None => return,
                 };
-                let _ = Command::new("open").arg("-R").arg(path).spawn();
+                reveal(&path);
             }
             KeyCode::Char('d') | KeyCode::Delete if deletable => self.confirm = Some(Confirm::Trash(target)),
             _ => list.cursor = step(list.cursor, rows.len(), code),
@@ -1040,7 +1040,7 @@ impl App {
             self.status = "No web page to open.".into();
             return;
         }
-        let _ = Command::new("open").arg(url).spawn();
+        launch(Command::new(OPENER).arg(url));
     }
 
     fn remove_selected(&mut self, target: Target) {
@@ -1051,7 +1051,8 @@ impl App {
         };
         if let (Target::Leftovers, Some(app)) = (target, &self.opened) {
             stop_agents(self.leftovers.selected());
-            if self.leftovers.selected().any(|item| item.path == app.path) {
+            // Linux has no per-app grants outside flatpak's own store.
+            if cfg!(target_os = "macos") && self.leftovers.selected().any(|item| item.path == app.path) {
                 reset_privacy(app);
             }
         }
@@ -1156,7 +1157,43 @@ fn step(cursor: usize, count: usize, code: KeyCode) -> usize {
     }
 }
 
+const OPENER: &str = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+
+/// Shows the item: Finder selects it in its folder. xdg-open cannot select, so it opens a folder
+/// itself and a file's parent folder.
+fn reveal(path: &Path) {
+    if cfg!(target_os = "macos") {
+        launch(Command::new(OPENER).arg("-R").arg(path));
+        return;
+    }
+    let folder = if path.is_dir() { Some(path) } else { path.parent() };
+    if let Some(folder) = folder {
+        launch(Command::new(OPENER).arg(folder));
+    }
+}
+
+/// Starts a desktop helper without a word on the TUI (xdg-open passes on its helpers' warnings) and
+/// reaps it on a thread of its own, which ends with the helper.
+fn launch(command: &mut Command) {
+    if let Ok(mut child) = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+        std::thread::spawn(move || child.wait());
+    }
+}
+
+/// Stops and disables the app's own systemd user units before their files go, so they stop running now.
+#[cfg(target_os = "linux")]
+fn stop_agents<'a>(items: impl Iterator<Item = &'a FileItem>) {
+    let units = scan::xdg("XDG_CONFIG_HOME", ".config").join("systemd/user");
+    for item in items.filter(|item| item.path.parent() == Some(units.as_path())) {
+        if let Some(unit) = item.path.file_name() {
+            // --no-block: a unit's stop timeout (90 s by default) would freeze the TUI.
+            let _ = Command::new("systemctl").args(["--user", "disable", "--now", "--no-block", "--"]).arg(unit).output();
+        }
+    }
+}
+
 /// Unloads the app's own launch agents before their plists go, so they stop running now.
+#[cfg(target_os = "macos")]
 fn stop_agents<'a>(items: impl Iterator<Item = &'a FileItem>) {
     let agents = scan::home().join("Library/LaunchAgents");
     // SAFETY: getuid has no preconditions.

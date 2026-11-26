@@ -81,9 +81,14 @@ impl Descriptor {
     }
 }
 
+/// Flathub ids are `io.github.<user>.<App>` and desktop projects host many apps: on Linux the second
+/// part names a forge or a desktop, not a vendor. On macOS `com.github.GitHubClient` is GitHub's own.
+const LINUX_HOSTS: &[&str] = &["github", "gitlab", "sourceforge", "codeberg", "gnome", "freedesktop", "flathub"];
+
 fn vendor(id: &str) -> Option<&str> {
     let vendor = id.split('.').nth(1)?;
-    (vendor.chars().count() >= 4 && !GENERIC_VENDORS.contains(&vendor)).then_some(vendor)
+    let host = cfg!(target_os = "linux") && LINUX_HOSTS.contains(&vendor);
+    (vendor.chars().count() >= 4 && !GENERIC_VENDORS.contains(&vendor) && !host).then_some(vendor)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

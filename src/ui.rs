@@ -758,6 +758,10 @@ fn draw_confirm(frame: &mut Frame, app: &App, confirm: &Confirm) {
             let list = app.list(*target);
             let what = format!("{} ({})", plural(list.selected().count(), "item"), format_bytes(list.selected_bytes()));
             let mut text = match (target, &app.opened) {
+                (Target::Leftovers, Some(opened)) if cfg!(target_os = "linux") && opened.is_system => vec![
+                    Line::styled(format!("Remove the files of {}?", opened.name), BOLD),
+                    Line::raw(format!("Moves {what} to the Trash. The app itself stays: uninstall it with its package manager.")),
+                ],
                 (Target::Leftovers, Some(opened)) => vec![Line::styled(format!("Uninstall {}?", opened.name), BOLD), Line::raw(format!("Moves {what} to the Trash."))],
                 _ => vec![Line::styled(format!("Move {what} to the Trash?"), BOLD)],
             };

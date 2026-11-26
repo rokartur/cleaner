@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+#[cfg(target_os = "macos")]
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
@@ -9,8 +10,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 
 /// Per-entry error code, valid only in bulk calls; libc does not define it.
+#[cfg(target_os = "macos")]
 const ATTR_CMN_ERROR: u32 = 0x2000_0000;
+#[cfg(target_os = "macos")]
 const VREG: u32 = 1;
+#[cfg(target_os = "macos")]
 const VDIR: u32 = 2;
 /// More threads stop paying off on APFS: on an M1 Max, 8 threads and 16 measured the same.
 const MAX_THREADS: usize = 8;
@@ -47,6 +51,7 @@ pub fn sizes(paths: &[PathBuf]) -> Vec<(u64, bool)> {
     std::thread::scope(|scope| {
         for _ in 0..threads {
             scope.spawn(|| {
+                #[cfg(target_os = "macos")]
                 let mut buffer = vec![0u8; 64 * 1024];
                 loop {
                     let mut state = queue.lock().unwrap();
@@ -63,7 +68,10 @@ pub fn sizes(paths: &[PathBuf]) -> Vec<(u64, bool)> {
                     drop(state);
 
                     let mut found = Vec::new();
+                    #[cfg(target_os = "macos")]
                     let (bytes, readable) = read_folder(&folder, &mut buffer, &mut found, &linked);
+                    #[cfg(target_os = "linux")]
+                    let (bytes, readable) = read_folder(&folder, &mut found, &linked);
                     totals[folder.item].fetch_add(bytes, Ordering::Relaxed);
                     if !readable {
                         complete[folder.item].store(false, Ordering::Relaxed);
@@ -85,6 +93,7 @@ pub fn sizes(paths: &[PathBuf]) -> Vec<(u64, bool)> {
 
 /// Sums one folder's files and adds its subfolders to `found`. One `getattrlistbulk` call fills a
 /// buffer where `readdir` needs an `lstat` per entry: ~/Library/Developer took 1.3 s instead of 2.3 s.
+#[cfg(target_os = "macos")]
 fn read_folder(folder: &Folder, buffer: &mut [u8], found: &mut Vec<Folder>, linked: &Mutex<HashSet<(usize, u64)>>) -> (u64, bool) {
     let Ok(dir) = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(&folder.path) else { return (0, false) };
     let Ok(meta) = File::metadata(&dir) else { return (0, false) };
@@ -150,7 +159,54 @@ fn read_folder(folder: &Folder, buffer: &mut [u8], found: &mut Vec<Folder>, link
     }
 }
 
+/// Linux has no bulk call: `readdir`, then one `lstat` per entry. The folder is read through the
+/// descriptor O_NOFOLLOW opened, so one swapped for a link in between is never followed.
+#[cfg(target_os = "linux")]
+fn read_folder(folder: &Folder, found: &mut Vec<Folder>, linked: &Mutex<HashSet<(usize, u64)>>) -> (u64, bool) {
+    let Ok(dir) = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(&folder.path) else { return (0, false) };
+    let Ok(meta) = File::metadata(&dir) else { return (0, false) };
+    if meta.dev() != folder.device {
+        return (0, true);
+    }
+    // Without /proc (a bare chroot) the path is read again, as before the descriptor.
+    let entries = std::fs::read_dir(format!("/proc/self/fd/{}", dir.as_raw_fd())).or_else(|_| std::fs::read_dir(&folder.path));
+    let Ok(entries) = entries else { return (0, false) };
+    let (mut bytes, mut readable) = (0, true);
+    for entry in entries {
+        let Ok(entry) = entry else {
+            readable = false;
+            continue;
+        };
+        // DirEntry::metadata does not follow links on Unix, so a link counts 0.
+        let Ok(meta) = entry.metadata() else {
+            readable = false;
+            continue;
+        };
+        if meta.is_dir() {
+            found.push(Folder { item: folder.item, path: folder.path.join(entry.file_name()), device: folder.device });
+        } else if meta.is_file() && (meta.nlink() < 2 || linked.lock().unwrap().insert((folder.item, meta.ino()))) {
+            bytes += meta.blocks() * 512;
+        }
+    }
+    (bytes, readable)
+}
+
 /// The home volume's size and the bytes still free for the user, as `df` shows them.
+#[cfg(target_os = "linux")]
+pub fn disk_space() -> Option<(u64, u64)> {
+    let home = std::ffi::CString::new(crate::scan::home().as_os_str().as_bytes()).ok()?;
+    // SAFETY: statvfs is plain data.
+    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: home is NUL-terminated and stats is a writable statvfs.
+    if unsafe { libc::statvfs(home.as_ptr(), &mut stats) } != 0 {
+        return None;
+    }
+    let block = stats.f_frsize as u64;
+    Some((stats.f_blocks as u64 * block, stats.f_bavail as u64 * block))
+}
+
+/// The home volume's size and the bytes still free for the user, as `df` shows them.
+#[cfg(target_os = "macos")]
 pub fn disk_space() -> Option<(u64, u64)> {
     let home = std::ffi::CString::new(crate::scan::home().as_os_str().as_bytes()).ok()?;
     // SAFETY: statfs is plain data.
@@ -164,6 +220,7 @@ pub fn disk_space() -> Option<(u64, u64)> {
 }
 
 /// A plain-data field of a `getattrlistbulk` buffer, which packs fields without alignment.
+#[cfg(target_os = "macos")]
 fn read<T: Copy>(buffer: &[u8], at: usize) -> T {
     let bytes = &buffer[at..at + size_of::<T>()];
     // SAFETY: `bytes` holds size_of::<T>() initialized bytes, and every T read here is integers only.
