@@ -1,6 +1,6 @@
 [package]
 name = "cleaner"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Uninstall Mac and Linux apps with their leftovers, clean junk and orphaned files, from the terminal"
